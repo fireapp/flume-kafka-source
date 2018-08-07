@@ -10,7 +10,7 @@
 
 ```
 
-# complise
+# building from source
 mvn clean -e -U install -DskipTests=true
 
 # use it with flume plugin, copy $SOURCE/target/flume-kafka-source-1.0.0.jar to
