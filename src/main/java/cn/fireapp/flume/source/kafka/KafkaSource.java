@@ -82,6 +82,8 @@ public class KafkaSource extends AbstractPollableSource
 
   private final List<Event> eventList = new ArrayList<Event>();
   private Map<TopicPartition, OffsetAndMetadata> tpAndOffsetMetadata;
+  private Map<TopicPartition, OffsetAndMetadata> offsetMetadataCacheMap;
+
   private AtomicBoolean rebalanceFlag;
 
   private Map<String, String> headers;
@@ -256,8 +258,10 @@ public class KafkaSource extends AbstractPollableSource
         }
 
         // For each partition store next offset that is going to be read.
-        tpAndOffsetMetadata.put(new TopicPartition(message.topic(), message.partition()),
-                new OffsetAndMetadata(message.offset() + 1));
+        TopicPartition topicPartition = new TopicPartition(message.topic(), message.partition());
+        OffsetAndMetadata offsetAndMetadata = new OffsetAndMetadata(message.offset() + 1);
+        tpAndOffsetMetadata.put(topicPartition, offsetAndMetadata);
+        offsetMetadataCacheMap.put(topicPartition, offsetAndMetadata);
       }
 
       if (eventList.size() > 0) {
@@ -303,6 +307,7 @@ public class KafkaSource extends AbstractPollableSource
     this.context = context;
     headers = new HashMap<String, String>(4);
     tpAndOffsetMetadata = new HashMap<TopicPartition, OffsetAndMetadata>();
+    offsetMetadataCacheMap = new HashMap<TopicPartition, OffsetAndMetadata>();
     rebalanceFlag = new AtomicBoolean(false);
     kafkaProps = new Properties();
 
@@ -435,7 +440,8 @@ public class KafkaSource extends AbstractPollableSource
     consumer = new KafkaConsumer<String, byte[]>(kafkaProps);
 
     // Subscribe for topics by already specified strategy
-    subscriber.subscribe(consumer, new SourceRebalanceListener(consumer, rebalanceFlag));
+    subscriber.subscribe(consumer,
+        new SourceRebalanceListener(consumer, offsetMetadataCacheMap, rebalanceFlag));
 
     // Connect to kafka. 1 second is optimal time.
     it = consumer.poll(1000).iterator();
@@ -472,10 +478,13 @@ class SourceRebalanceListener implements ConsumerRebalanceListener {
   private static final Logger log = LoggerFactory.getLogger(SourceRebalanceListener.class);
   private AtomicBoolean rebalanceFlag;
   private KafkaConsumer<String, byte[]> consumer;
+  private Map<TopicPartition, OffsetAndMetadata> offsetMetadataCacheMap;
 
   public SourceRebalanceListener(KafkaConsumer<String, byte[]> consumer,
+                                 Map<TopicPartition, OffsetAndMetadata> offsetMetadataCacheMap,
                                  AtomicBoolean rebalanceFlag) {
     this.consumer = consumer;
+    this.offsetMetadataCacheMap = offsetMetadataCacheMap;
     this.rebalanceFlag = rebalanceFlag;
   }
 
@@ -488,17 +497,27 @@ class SourceRebalanceListener implements ConsumerRebalanceListener {
   }
 
   public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
-    //bug fixed here when kafka rebalance maybe repeat
     for (TopicPartition partition : partitions) {
-      long offset = 0L;
-      OffsetAndMetadata committed = consumer.committed(partition);
-      if (null != committed) {
-        offset = committed.offset();
+      long offset = -1L;
+      String type = "none";
+      OffsetAndMetadata offsetAndMetadata = offsetMetadataCacheMap.get(partition);
+      if (null != offsetAndMetadata) {
+
+        offset = offsetAndMetadata.offset();
         consumer.seek(partition, offset);
+        type = "cache";
+      } else {
+
+        OffsetAndMetadata committed = consumer.committed(partition);
+        if (null != committed) {
+          offset = committed.offset();
+          consumer.seek(partition, offset);
+          type = "committed";
+        }
       }
 
-      log.info("topic {} - partition {} assigned offset {}",
-          new Object[]{partition.topic(), partition.partition(), offset});
+      log.info("topic {} - partition {} assigned offset {} by {}",
+          new Object[]{partition.topic(), partition.partition(), offset, type});
     }
   }
 }
